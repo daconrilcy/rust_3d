@@ -30,4 +30,18 @@ fn main() {
 
     println!("Triangles créés : {}, {}", triangle_0_id, triangle_1_id);
     println!("Polygon créé : {}", polygon_0_id);
+
+
+    let bad_triangle_result = mesh.add_triangle(0, 1, 999);
+
+    match bad_triangle_result {
+        Ok(triangle_id) => {
+            println!("Triangle créé : {}", triangle_id);
+        }
+
+        Err(error) => {
+            println!("Erreur debug : {:?}", error);
+            println!("Erreur lisible : {}", error);
+        }
+    }
 }
