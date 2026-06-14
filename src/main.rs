@@ -1,6 +1,8 @@
 mod geometry;
 
-use eframe::egui;
+use std::fmt::format;
+
+use eframe::egui::{self, CursorIcon::ZoomOut, Key::Z, SliderOrientation::{Horizontal, Vertical}};
 use geometry::Mesh;
 
 fn main() -> eframe::Result<()> {
@@ -60,38 +62,35 @@ impl ViewKind {
             ViewKind::Perspective3D => "Vue 3D perspective",
         }
     }
+
+    fn is_drawable(&self) -> bool {
+        match self {
+            ViewKind::Front => true,
+            ViewKind::Left => true,
+            ViewKind::Top => true,
+            ViewKind::Perspective3D => false,
+        }
+    }
 }
 
 struct ModelerApp {
     mesh: Mesh,
     active_tool: Tool,
     last_message: String,
+    zoom: f32,
+    pending_triangle_vertex_ids: Vec<usize>,
 }
 
 impl Default for ModelerApp {
     fn default() -> Self {
         let mut mesh = Mesh::new();
 
-        let vertex_0_id = mesh.add_vertex(0.0, 0.0, 0.0);
-        let vertex_1_id = mesh.add_vertex(1.0, 0.0, 0.0);
-        let vertex_2_id = mesh.add_vertex(1.0, 1.0, 0.0);
-        let vertex_3_id = mesh.add_vertex(0.0, 1.0, 0.0);
-
-        let triangle_0_id = mesh
-            .add_triangle(vertex_0_id, vertex_1_id, vertex_2_id)
-            .expect("Impossible de créer le triangle 0");
-
-        let triangle_1_id = mesh
-            .add_triangle(vertex_0_id, vertex_2_id, vertex_3_id)
-            .expect("Impossible de créer le triangle 1");
-
-        mesh.add_polygon(vec![triangle_0_id, triangle_1_id])
-            .expect("Impossible de créer le polygon 0");
-
         Self { 
             mesh, 
             active_tool: Tool::DrawTriangle, 
-            last_message: "Premier affichage graphique du Mesh".to_string() 
+            last_message: "Premier affichage graphique du Mesh".to_string(),
+            zoom: 50.0,
+            pending_triangle_vertex_ids: Vec::new(), 
         }
     }
 }
@@ -182,6 +181,27 @@ impl ModelerApp {
 
             ui.separator();
 
+            ui.heading("View settings");
+
+            ui.add(
+                egui::Slider::new(&mut self.zoom, 10.0..=200.0)
+                .text("Zoom"),
+            );
+
+            ui.separator();
+
+            ui.heading("Current Triangle");
+
+            ui.label(format!(
+                "Pending Vertices: {}/3",
+                self.pending_triangle_vertex_ids.len()
+            ));
+
+            if ui.button("Cancel current triangle").clicked(){
+                self.pending_triangle_vertex_ids.clear();
+                self.last_message = "Current triangle cancelled.".to_string();
+            }
+
             ui.heading("Status");
             ui.label(&self.last_message);
 
@@ -230,6 +250,8 @@ impl ModelerApp {
             egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
             egui::StrokeKind::Inside,
         );
+
+        self.draw_vertices_in_view(painter, rect, view_kind);
     
         painter.text(
             rect.left_top() + egui::vec2(10.0, 10.0),
@@ -246,9 +268,230 @@ impl ModelerApp {
             egui::FontId::monospace(12.0),
             egui::Color32::from_gray(170),
         );
+
     
         if response.clicked() {
-            self.last_message = format!("Clicked in {} view.", view_kind.label());
+            if let Some(pointer_position) = response.interact_pointer_pos(){
+
+                let world_position = Self::pointer_to_world_position(
+                    pointer_position, 
+                    rect, 
+                    view_kind, 
+                    self.zoom,
+                );
+
+                match self.active_tool {
+                    Tool::Select => {
+                        self.last_message = format!(
+                             "Select tool clicked in {} view at x={:.2}, y={:.2}, z={:.2}",
+                            view_kind.label(),
+                            world_position[0],
+                            world_position[1],
+                            world_position[2],    
+                        );
+                    }
+
+                    Tool::DrawTriangle => {
+                        self.handle_draw_triangle_click(view_kind, world_position);
+                    }
+                }
+        
+            }
         }
     }
+
+    fn pointer_to_local_position(pointer_position: egui::Pos2, rect: egui::Rect) -> egui::Vec2{
+        egui::vec2 (
+            pointer_position.x - rect.left(),
+            pointer_position.y - rect.top(),
+        )
+    }
+
+    fn pointer_to_centered_position(pointer_position: egui::Pos2, rect: egui::Rect) -> egui::Vec2{
+        egui::vec2 (
+            pointer_position.x - rect.center().x,
+            rect.center().y - pointer_position.y,
+        )
+    }
+
+    fn pointer_to_world_position(
+        pointer_position: egui::Pos2,
+        rect: egui::Rect,
+        view_kind: ViewKind,
+        zoom: f32,
+    ) -> [f32; 3] {
+        
+        let centered_position = Self::pointer_to_centered_position(pointer_position, rect);
+        
+        let world_horizontal = centered_position.x / zoom;
+        let world_vertical = centered_position.y / zoom;
+
+        match view_kind {
+            ViewKind::Front => [
+                world_horizontal,
+                world_vertical,
+                0.0,
+            ],
+
+            ViewKind::Left => [
+                0.0,
+                world_vertical,
+                world_horizontal,
+            ],
+
+            ViewKind::Top => [
+                world_horizontal,
+                world_vertical,
+                0.0,
+            ],
+
+            ViewKind::Perspective3D => [
+                world_horizontal,
+                world_vertical,
+                0.0,
+            ],
+        }
+    }
+
+    fn handle_draw_triangle_click(&mut self, view_kind: ViewKind, world_position: [f32; 3]){
+        if !view_kind.is_drawable(){
+            self.last_message = "For now, draw triangles only in FRONT, LEFT or TOP view".to_string();
+            return;
+        }
+
+        let vertex_id = self.mesh.add_vertex(
+            world_position[0],
+            world_position[1], 
+            world_position[2]
+        );
+
+        self.pending_triangle_vertex_ids.push(vertex_id);
+
+        if self.pending_triangle_vertex_ids.len() < 3 {
+            self.last_message = format!(
+                 "Vertex #{} created in {} view. Pending triangle: {}/3 vertices.",
+                vertex_id,
+                view_kind.label(),
+                self.pending_triangle_vertex_ids.len()
+            );
+
+            return;
+        }
+
+        let vertex_0_id = self.pending_triangle_vertex_ids[0];
+        let vertex_1_id = self.pending_triangle_vertex_ids[1];
+        let vertex_2_id = self.pending_triangle_vertex_ids[2];
+
+        match self
+            .mesh
+            .add_triangle(vertex_0_id, vertex_1_id, vertex_2_id)
+            {
+                Ok(triangle_id) => {
+                    self.last_message = format!(
+                        "Triangle #{} created with vertices #{}, #{}, #{}.",
+                        triangle_id,
+                        vertex_0_id,
+                        vertex_1_id,
+                        vertex_2_id
+                    );
+                }
+
+            Err(error) => {
+                self.last_message = format!("Could not create triangle: {}", error);
+            }
+        }
+
+        self.pending_triangle_vertex_ids.clear();
+
+    }
+
+    fn world_to_screen_position(
+        world_position: [f32; 3],
+        rect: egui::Rect,
+        view_kind: ViewKind,
+        zoom: f32,
+    ) -> egui::Pos2 {
+        let x = world_position[0];
+        let y = world_position[1];
+        let z = world_position[2];
+
+        let (horizontal, vertical) = match view_kind {
+            ViewKind::Front => {
+                //Vue de Face : on voit x/y
+                (x,y)
+            }
+
+            ViewKind::Left =>{
+                //Vue de gauche : on voit z/y
+                (z,y)
+            }
+
+            ViewKind::Top => {
+                // Vue du dessus : on voit x/z
+                (x,z)
+            }
+
+            ViewKind::Perspective3D => {
+                //Projection 3D temporaire simpliste
+                //Pas encore OpenGL
+
+                let iso_x = x-z * 0.8;
+                let iso_y = y - (x+z) * 0.35;
+
+                (iso_x, iso_y)
+            }
+        };
+
+        egui::pos2 ( 
+            rect.center().x + horizontal * zoom, 
+            rect.center().y - vertical * zoom,
+        )
+    }
+
+    fn draw_vertices_in_view(
+        &self,
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        view_kind: ViewKind,
+    ){
+        let vertex_positions = self.mesh.get_vertex_positions();
+
+        for (vertex_id, world_position) in vertex_positions.iter().enumerate(){
+            let screen_position = Self::world_to_screen_position(
+                *world_position, 
+                rect, 
+                view_kind, 
+                self.zoom,
+            );
+
+            let is_pending = self.pending_triangle_vertex_ids.contains(&vertex_id);
+
+            let radius = if is_pending {
+                5.0
+            } else {
+                4.0
+            };
+
+            let color = if is_pending {
+                egui::Color32::YELLOW
+            } else {
+                egui::Color32::WHITE
+            };
+
+            painter.circle_filled(
+                screen_position, 
+                radius, 
+                color,
+            );
+
+            painter.text(
+                screen_position+ egui::vec2(6.0, -6.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("#{}", vertex_id),
+                egui::FontId::monospace(10.0),
+                egui::Color32::from_gray(180),
+            );
+        }
+    }
+
 }
